@@ -1,0 +1,98 @@
+package story
+
+import (
+	"errors"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// TrackerNamespace is the root namespace for all Signal IDs.
+// It is a fixed compile-time constant so IDs are stable regardless of
+// deployment path, working directory, or how the store is configured.
+var TrackerNamespace = uuid.MustParse("d4e5f6a7-b8c9-4d0e-1f2a-3b4c5d6e7f80")
+
+// ErrDimensionMismatch is returned by Ingest when the signal's embedding
+// length differs from the dimensionality established by the first ingested signal.
+var ErrDimensionMismatch = errors.New("story: embedding dimension mismatch")
+
+// ErrNotFound is returned when a requested story does not exist in the store.
+var ErrNotFound = errors.New("story: not found")
+
+// StoryState is the lifecycle state of a story.
+type StoryState uint8
+
+const (
+	// StoryStateAny is a sentinel for Stories() — iterates all states.
+	StoryStateAny StoryState = 0
+
+	StoryStateActive   StoryState = iota // receiving signals or within SilenceWindow
+	StoryStateDormant                    // no signals for SilenceWindow; membership locked; can reactivate
+	StoryStateArchived                   // no signals for ArchiveWindow; terminal; signals retained
+)
+
+// Signal is the atomic unit of input.
+type Signal[T any] struct {
+	ID        uuid.UUID
+	At        time.Time
+	Embedding []float32
+	Data      T
+}
+
+// StoryMeta holds the current metadata for a persistent story.
+type StoryMeta struct {
+	ID           uuid.UUID
+	State        StoryState
+	Centroid     []float32
+	Radius       float64
+	CreatedAt    time.Time
+	LastSignalAt time.Time
+
+	// FrozenMeanDistance and FrozenSigma are captured on the Dormant
+	// transition and used for Draft-phase threshold calculation until
+	// reactivation, at which point they are cleared.
+	FrozenMeanDistance float64
+	FrozenSigma        float64
+}
+
+// EventKind identifies the type of a StoryEvent.
+type EventKind uint8
+
+const (
+	EventDraftAssigned    EventKind = iota // real-time: signal provisionally assigned to story
+	EventSignalReassigned                  // batch: signal moved to a different story
+	EventStoryCreated                      // new story persisted after batch run
+	EventStorySplit                        // one story split into two
+	EventStoryMerged                       // two stories merged; StoryID2 is the retired ID
+	EventStoryDormant                      // story crossed SilenceWindow
+	EventStoryArchived                     // story crossed ArchiveWindow
+	EventBatchComplete                     // one per batch run; BatchSummary is populated
+	EventBufferOverflow                    // subscriber channel full; events were dropped
+)
+
+// StoryEvent is emitted to subscribers on every story state change and
+// per-signal assignment decision.
+type StoryEvent[T any] struct {
+	Kind     EventKind
+	StoryID  uuid.UUID  // primary story
+	StoryID2 uuid.UUID  // merged-away story (Merged) or new child story (Split)
+	SignalID  uuid.UUID // set for per-signal events (DraftAssigned, SignalReassigned)
+	At       time.Time
+
+	// BatchSummary is populated only for EventBatchComplete.
+	BatchSummary *BatchSummary
+}
+
+// BatchSummary carries aggregate counts for a completed batch run.
+//
+// Subscribers that cannot handle high per-signal event rates should consume
+// EventBatchComplete for coarse-grained progress and query the store for
+// details rather than relying on individual EventSignalReassigned events.
+type BatchSummary struct {
+	StoriesCreated    int
+	StoriesMerged     int
+	StoriesSplit      int
+	SignalsReassigned int
+	OutliersEvicted   int
+	OutliersPromoted  int
+}
