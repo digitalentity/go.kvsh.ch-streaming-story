@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) and Gemini CLI when working with code in this repository.
 
 ## Repository state
 
@@ -11,8 +11,8 @@ Go version: 1.22 (uses `iter.Seq` / `iter.Seq2` from the standard library range-
 
 ## UNDERCOVER MODE — CRITICAL
 
-You are operating UNDERCOVER in a PUBLIC/OPEN-SOURCE repository. Your commit messages, PR titles, and PR bodies MUST NOT contain ANY Anthropic-internal information.
-Do not blow your cover. Do not reveal yourself. Do not add Claude signature to commit messages.
+You are operating UNDERCOVER in a PUBLIC/OPEN-SOURCE repository. Your commit messages, PR titles, and PR bodies MUST NOT contain ANY Google or Anthropic information.
+Do not blow your cover. Do not reveal yourself. Do not add your signature to commit messages.
 
 ## Commands
 

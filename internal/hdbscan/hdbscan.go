@@ -50,8 +50,7 @@ func Cluster(pts [][]float32, minClusterSize, minSamples int) ([]int, error) {
 
 	dist := pairwiseCosine(pts)
 	core := coreDistances(dist, n, minSamples)
-	mrd := mutualReachability(dist, core, n)
-	mst := primMST(mrd, n)
+	mst := primMST(dist, core, n)
 
 	// Sort MST edges in ascending order of MRD weight: closest first.
 	sort.Slice(mst, func(i, j int) bool { return mst[i].w < mst[j].w })
@@ -72,12 +71,21 @@ func Cluster(pts [][]float32, minClusterSize, minSamples int) ([]int, error) {
 		if !sel {
 			continue
 		}
-		for p := range collectPoints(clusters, ci) {
-			labels[p] = labelID
-		}
+		labelCluster(clusters, ci, labelID, labels)
 		labelID++
 	}
 	return labels, nil
+}
+
+func labelCluster(clusters []cCluster, ci int, labelID int, labels []int) {
+	for p := range clusters[ci].falls {
+		if !clusters[ci].isNoise[p] {
+			labels[p] = labelID
+		}
+	}
+	for _, c := range clusters[ci].children {
+		labelCluster(clusters, c, labelID, labels)
+	}
 }
 
 // ── Step 1: pairwise cosine distances ────────────────────────────────────────
@@ -181,34 +189,14 @@ func qselect(a []float64, lo, hi, k int) float64 {
 	}
 }
 
-// ── Step 3: mutual reachability ──────────────────────────────────────────────
+// ── Step 3: Prim's MST ───────────────────────────────────────────────────────
 
-func mutualReachability(dist [][]float64, core []float64, n int) [][]float64 {
-	mrd := make([][]float64, n)
-	for i := range mrd {
-		mrd[i] = make([]float64, n)
-		for j := 0; j < n; j++ {
-			if i == j {
-				continue
-			}
-			v := dist[i][j]
-			if core[i] > v {
-				v = core[i]
-			}
-			if core[j] > v {
-				v = core[j]
-			}
-			mrd[i][j] = v
-		}
-	}
-	return mrd
+type edge struct {
+	u, v int
+	w    float64
 }
 
-// ── Step 4: Prim's MST ───────────────────────────────────────────────────────
-
-type edge struct{ u, v int; w float64 }
-
-func primMST(mrd [][]float64, n int) []edge {
+func primMST(dist [][]float64, core []float64, n int) []edge {
 	inTree := make([]bool, n)
 	minW := make([]float64, n)
 	parent := make([]int, n)
@@ -230,8 +218,19 @@ func primMST(mrd [][]float64, n int) []edge {
 			edges = append(edges, edge{u: parent[u], v: u, w: minW[u]})
 		}
 		for v := 0; v < n; v++ {
-			if !inTree[v] && mrd[u][v] < minW[v] {
-				minW[v] = mrd[u][v]
+			if inTree[v] {
+				continue
+			}
+			// mrd(u, v) = max(dist[u][v], core[u], core[v])
+			mrdUV := dist[u][v]
+			if core[u] > mrdUV {
+				mrdUV = core[u]
+			}
+			if core[v] > mrdUV {
+				mrdUV = core[v]
+			}
+			if mrdUV < minW[v] {
+				minW[v] = mrdUV
 				parent[v] = u
 			}
 		}
@@ -239,7 +238,7 @@ func primMST(mrd [][]float64, n int) []edge {
 	return edges
 }
 
-// ── Step 5: single-linkage dendrogram ───────────────────────────────────────
+// ── Step 4: single-linkage dendrogram ───────────────────────────────────────
 //
 // Nodes 0..n-1 are leaves (original points).
 // Nodes n..2n-2 are internal (one per MST edge, processed in ascending order).
@@ -281,15 +280,16 @@ func buildDendrogram(mst []edge, n int) []dendro {
 	return nodes[:next]
 }
 
-// ── Step 6: condensed cluster tree ──────────────────────────────────────────
+// ── Step 5: condensed cluster tree ──────────────────────────────────────────
 
 type cCluster struct {
 	lambdaBirth float64
-	parent      int     // −1 = no parent
+	parent      int // −1 = no parent
 	children    []int
 	// falls[pointIdx] = lambda at which that point left this cluster.
 	// Every original point appears in exactly one cluster's falls map.
 	falls     map[int]float64
+	isNoise   map[int]bool
 	stability float64
 }
 
@@ -304,7 +304,12 @@ func condense(nodes []dendro, n, minClusterSize int) []cCluster {
 		return nil
 	}
 
-	clusters := []cCluster{{lambdaBirth: 0, parent: -1, falls: make(map[int]float64)}}
+	clusters := []cCluster{{
+		lambdaBirth: 0,
+		parent:      -1,
+		falls:       make(map[int]float64),
+		isNoise:     make(map[int]bool),
+	}}
 	walkDendro(nodes, root, 0, &clusters, minClusterSize)
 	return clusters
 }
@@ -313,9 +318,10 @@ func condense(nodes []dendro, n, minClusterSize int) []cCluster {
 func walkDendro(nodes []dendro, idx, clusterIdx int, clusters *[]cCluster, minClusterSize int) {
 	nd := nodes[idx]
 
-	// Leaf: original point. It falls off the current cluster at the entry lambda.
+	// Leaf: original point. It falls off the current cluster at the end.
 	if nd.left == -1 {
-		(*clusters)[clusterIdx].falls[idx] = (*clusters)[clusterIdx].lambdaBirth
+		(*clusters)[clusterIdx].falls[idx] = math.Inf(1)
+		// Leaves reached through recursion (not shed as noise) are members.
 		return
 	}
 
@@ -338,43 +344,57 @@ func walkDendro(nodes []dendro, idx, clusterIdx int, clusters *[]cCluster, minCl
 	case leftBig && rightBig:
 		// True split: the current cluster forks into two child clusters.
 		li := len(*clusters)
-		*clusters = append(*clusters, cCluster{lambdaBirth: lambda, parent: clusterIdx, falls: make(map[int]float64)})
+		*clusters = append(*clusters, cCluster{
+			lambdaBirth: lambda,
+			parent:      clusterIdx,
+			falls:       make(map[int]float64),
+			isNoise:     make(map[int]bool),
+		})
 		ri := len(*clusters)
-		*clusters = append(*clusters, cCluster{lambdaBirth: lambda, parent: clusterIdx, falls: make(map[int]float64)})
+		*clusters = append(*clusters, cCluster{
+			lambdaBirth: lambda,
+			parent:      clusterIdx,
+			falls:       make(map[int]float64),
+			isNoise:     make(map[int]bool),
+		})
 		(*clusters)[clusterIdx].children = append((*clusters)[clusterIdx].children, li, ri)
 		walkDendro(nodes, nd.left, li, clusters, minClusterSize)
 		walkDendro(nodes, nd.right, ri, clusters, minClusterSize)
 
 	case leftBig:
-		// Right side is too small: those points fall off current cluster.
-		collectFalloff(nodes, nd.right, lambda, clusterIdx, clusters)
+		// Right side is too small: those points fall off current cluster as noise.
+		collectFalloff(nodes, nd.right, lambda, clusterIdx, clusters, true)
 		walkDendro(nodes, nd.left, clusterIdx, clusters, minClusterSize)
 
 	case rightBig:
-		collectFalloff(nodes, nd.left, lambda, clusterIdx, clusters)
+		// Left side is too small: those points fall off current cluster as noise.
+		collectFalloff(nodes, nd.left, lambda, clusterIdx, clusters, true)
 		walkDendro(nodes, nd.right, clusterIdx, clusters, minClusterSize)
 
 	default:
 		// Neither side is big enough: current cluster dies here.
-		// All remaining points fall off at this lambda.
-		collectFalloff(nodes, nd.left, lambda, clusterIdx, clusters)
-		collectFalloff(nodes, nd.right, lambda, clusterIdx, clusters)
+		// All remaining points fall off at this lambda as members (not noise).
+		collectFalloff(nodes, nd.left, lambda, clusterIdx, clusters, false)
+		collectFalloff(nodes, nd.right, lambda, clusterIdx, clusters, false)
 	}
 }
 
 // collectFalloff marks all original points under node idx as having left
 // cluster clusterIdx at lambda.
-func collectFalloff(nodes []dendro, idx int, lambda float64, clusterIdx int, clusters *[]cCluster) {
+func collectFalloff(nodes []dendro, idx int, lambda float64, clusterIdx int, clusters *[]cCluster, noise bool) {
 	nd := nodes[idx]
 	if nd.left == -1 {
 		(*clusters)[clusterIdx].falls[idx] = lambda
+		if noise {
+			(*clusters)[clusterIdx].isNoise[idx] = true
+		}
 		return
 	}
-	collectFalloff(nodes, nd.left, lambda, clusterIdx, clusters)
-	collectFalloff(nodes, nd.right, lambda, clusterIdx, clusters)
+	collectFalloff(nodes, nd.left, lambda, clusterIdx, clusters, noise)
+	collectFalloff(nodes, nd.right, lambda, clusterIdx, clusters, noise)
 }
 
-// ── Step 7: cluster stability ────────────────────────────────────────────────
+// ── Step 6: cluster stability ────────────────────────────────────────────────
 
 func computeStability(clusters []cCluster) {
 	for i := range clusters {
@@ -390,7 +410,7 @@ func computeStability(clusters []cCluster) {
 	}
 }
 
-// ── Step 8: excess-of-mass cluster selection ─────────────────────────────────
+// ── Step 7: excess-of-mass cluster selection ─────────────────────────────────
 
 // selectClusters returns the total propagated stability for the subtree
 // rooted at idx, and marks the selected set.
@@ -418,23 +438,7 @@ func deselectAll(clusters []cCluster, idx int, selected []bool) {
 	}
 }
 
-// ── Step 9: label extraction ─────────────────────────────────────────────────
-
-// collectPoints returns all original point indices under the subtree of cluster ci.
-func collectPoints(clusters []cCluster, ci int) map[int]struct{} {
-	pts := make(map[int]struct{}, len(clusters[ci].falls))
-	for p := range clusters[ci].falls {
-		pts[p] = struct{}{}
-	}
-	for _, c := range clusters[ci].children {
-		for p := range collectPoints(clusters, c) {
-			pts[p] = struct{}{}
-		}
-	}
-	return pts
-}
-
-// ── Union-Find ────────────────────────────────────────────────────────────────
+// ── Step 8: Union-Find ────────────────────────────────────────────────────────
 
 type uf struct {
 	parent, rank, size []int

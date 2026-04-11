@@ -74,9 +74,9 @@ const (
 // per-signal assignment decision.
 type StoryEvent[T any] struct {
 	Kind     EventKind
-	StoryID  uuid.UUID  // primary story
-	StoryID2 uuid.UUID  // merged-away story (Merged) or new child story (Split)
-	SignalID  uuid.UUID // set for per-signal events (DraftAssigned, SignalReassigned)
+	StoryID  uuid.UUID // primary story
+	StoryID2 uuid.UUID // merged-away story (Merged) or new child story (Split)
+	SignalID uuid.UUID // set for per-signal events (DraftAssigned, SignalReassigned)
 	At       time.Time
 
 	// BatchSummary is populated only for EventBatchComplete.
