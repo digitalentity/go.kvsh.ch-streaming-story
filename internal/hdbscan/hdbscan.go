@@ -65,17 +65,6 @@ func Cluster(pts [][]float32, minClusterSize, minSamples int) ([]int, error) {
 	computeStability(clusters, pointFallout)
 	selected := selectClusters(clusters)
 
-	anySelected := false
-	for _, s := range selected {
-		if s {
-			anySelected = true
-			break
-		}
-	}
-	if !anySelected {
-		return labels, nil
-	}
-
 	labelID := 0
 	for i := range clusters {
 		if selected[i] {
@@ -88,7 +77,7 @@ func Cluster(pts [][]float32, minClusterSize, minSamples int) ([]int, error) {
 
 func labelSubtree(clusters []cCluster, idx int, labelID int, labels []int, pointFallout []fallout) {
 	for _, f := range pointFallout {
-		if f.clusterIdx == idx {
+		if f.clusterIdx == idx && !f.isNoise {
 			labels[f.pointIdx] = labelID
 		}
 	}
@@ -145,6 +134,9 @@ func pairwiseCosine(pts [][]float32) [][]float64 {
 
 func coreDistances(dist [][]float64, n, minSamples int) []float64 {
 	core := make([]float64, n)
+	if minSamples <= 1 {
+		return core
+	}
 	row := make([]float64, n-1)
 	for i := 0; i < n; i++ {
 		idx := 0
@@ -154,7 +146,10 @@ func coreDistances(dist [][]float64, n, minSamples int) []float64 {
 				idx++
 			}
 		}
-		core[i] = kthSmallest(row, minSamples-1)
+		// Python hdbscan min_samples=k means distance to k-th neighbor (including self).
+		// Our 'row' excludes self, so k-th neighbor including self is (k-1)-th 
+		// neighbor in 'row', which is index k-2.
+		core[i] = kthSmallest(row, minSamples-2)
 	}
 	return core
 }
@@ -274,6 +269,7 @@ type fallout struct {
 	pointIdx   int
 	clusterIdx int
 	lambda     float64
+	isNoise    bool
 }
 
 func condense(nodes []dendro, n, minClusterSize int) ([]cCluster, []fallout) {
@@ -287,7 +283,7 @@ func condense(nodes []dendro, n, minClusterSize int) ([]cCluster, []fallout) {
 
 	clusters := []cCluster{{
 		lambdaBirth: 0,
-		lambdaDeath: 0, // Will be updated if it splits or dies
+		lambdaDeath: 0,
 		size:        nodes[root].size,
 	}}
 	var pointFallout []fallout
@@ -299,14 +295,8 @@ func condense(nodes []dendro, n, minClusterSize int) ([]cCluster, []fallout) {
 func walkDendro(nodes []dendro, idx, clusterIdx int, clusters *[]cCluster, pointFallout *[]fallout, mcs int) {
 	nd := nodes[idx]
 	if nd.left == -1 {
-		// Point reached leaf within this cluster.
-		// Use lambdaDeath of the cluster as fallout lambda if it dies here.
-		// Actually, if a cluster reaches a leaf, it effectively "ends" at Inf 
-		// if it was a true leaf, BUT in HDBSCAN* all points must eventually 
-		// fall out or split. If it's a leaf node in the dendrogram, it's a point.
-		// If it stayed until the end of this cluster, we'll use Inf, 
-		// and computeStability will cap it at lambdaDeath.
-		*pointFallout = append(*pointFallout, fallout{pointIdx: idx, clusterIdx: clusterIdx, lambda: math.Inf(1)})
+		// This point reached a leaf in the hierarchy.
+		*pointFallout = append(*pointFallout, fallout{pointIdx: idx, clusterIdx: clusterIdx, lambda: math.Inf(1), isNoise: false})
 		return
 	}
 
@@ -319,38 +309,38 @@ func walkDendro(nodes []dendro, idx, clusterIdx int, clusters *[]cCluster, point
 		(*clusters)[clusterIdx].lambdaDeath = nd.lambda
 		
 		li := len(*clusters)
-		*clusters = append(*clusters, cCluster{lambdaBirth: nd.lambda, lambdaDeath: math.Inf(1), size: left.size})
+		*clusters = append(*clusters, cCluster{lambdaBirth: nd.lambda, lambdaDeath: 0, size: left.size})
 		ri := len(*clusters)
-		*clusters = append(*clusters, cCluster{lambdaBirth: nd.lambda, lambdaDeath: math.Inf(1), size: right.size})
+		*clusters = append(*clusters, cCluster{lambdaBirth: nd.lambda, lambdaDeath: 0, size: right.size})
 		
 		(*clusters)[clusterIdx].children = append((*clusters)[clusterIdx].children, li, ri)
 		
 		walkDendro(nodes, nd.left, li, clusters, pointFallout, mcs)
 		walkDendro(nodes, nd.right, ri, clusters, pointFallout, mcs)
 	} else if leftBig {
-		// Right is noise.
-		collectFallout(nodes, nd.right, nd.lambda, clusterIdx, pointFallout)
+		// Right is noise fallout.
+		collectFallout(nodes, nd.right, nd.lambda, clusterIdx, pointFallout, true)
 		walkDendro(nodes, nd.left, clusterIdx, clusters, pointFallout, mcs)
 	} else if rightBig {
-		// Left is noise.
-		collectFallout(nodes, nd.left, nd.lambda, clusterIdx, pointFallout)
+		// Left is noise fallout.
+		collectFallout(nodes, nd.left, nd.lambda, clusterIdx, pointFallout, true)
 		walkDendro(nodes, nd.right, clusterIdx, clusters, pointFallout, mcs)
 	} else {
-		// Both are noise, cluster dies.
+		// Both are small, cluster dies here.
 		(*clusters)[clusterIdx].lambdaDeath = nd.lambda
-		collectFallout(nodes, nd.left, nd.lambda, clusterIdx, pointFallout)
-		collectFallout(nodes, nd.right, nd.lambda, clusterIdx, pointFallout)
+		collectFallout(nodes, nd.left, math.Inf(1), clusterIdx, pointFallout, false)
+		collectFallout(nodes, nd.right, math.Inf(1), clusterIdx, pointFallout, false)
 	}
 }
 
-func collectFallout(nodes []dendro, idx int, lambda float64, clusterIdx int, pointFallout *[]fallout) {
+func collectFallout(nodes []dendro, idx int, lambda float64, clusterIdx int, pointFallout *[]fallout, isNoise bool) {
 	nd := nodes[idx]
 	if nd.left == -1 {
-		*pointFallout = append(*pointFallout, fallout{pointIdx: idx, clusterIdx: clusterIdx, lambda: lambda})
+		*pointFallout = append(*pointFallout, fallout{pointIdx: idx, clusterIdx: clusterIdx, lambda: lambda, isNoise: isNoise})
 		return
 	}
-	collectFallout(nodes, nd.left, lambda, clusterIdx, pointFallout)
-	collectFallout(nodes, nd.right, lambda, clusterIdx, pointFallout)
+	collectFallout(nodes, nd.left, lambda, clusterIdx, pointFallout, isNoise)
+	collectFallout(nodes, nd.right, lambda, clusterIdx, pointFallout, isNoise)
 }
 
 // ── Step 6: cluster stability ────────────────────────────────────────────────
@@ -363,9 +353,6 @@ func computeStability(clusters []cCluster, pointFallout []fallout) {
 			if f.clusterIdx == i {
 				lamP := f.lambda
 				if math.IsInf(lamP, 1) {
-					// This point stayed until the cluster split or died.
-					// If it died, it fell out at lambdaDeath.
-					// If it split, it also effectively "ended" for THIS cluster node at lambdaDeath.
 					lamP = clusters[i].lambdaDeath
 				}
 				d := lamP - birth
@@ -374,9 +361,7 @@ func computeStability(clusters []cCluster, pointFallout []fallout) {
 				}
 			}
 		}
-		// Also add contribution from points that stayed in the cluster until it split into children.
-		// Reference formula often expresses this by saying points in children are also in parent.
-		// S(C) = sum_{p in C_direct_fallout} (lambda_p - lambda_birth) + sum_{child in children} child.size * (child.lambda_birth - lambda_birth)
+		// Points in children are also in parent at parent's birth.
 		for _, childIdx := range clusters[i].children {
 			child := clusters[childIdx]
 			s += float64(child.size) * (child.lambdaBirth - birth)
@@ -408,14 +393,13 @@ func selectClusters(clusters []cCluster) []bool {
 	}
 
 	selected := make([]bool, n)
-	// Top-down pass to select.
+	// Top-down pass to select. Skip root if it split.
 	var bfs []int
 	if len(clusters[0].children) > 0 {
 		bfs = append(bfs, clusters[0].children...)
 	} else {
-		// Root has no children, so it's the only potential cluster.
-		// Select it if its stability is finite and > 0.
-		if !math.IsInf(clusters[0].stability, 1) && clusters[0].stability > 0 {
+		// Root is leaf, so it's the only potential cluster.
+		if clusters[0].stability > 0 || math.IsInf(clusters[0].stability, 1) {
 			selected[0] = true
 		}
 		return selected
@@ -426,7 +410,7 @@ func selectClusters(clusters []cCluster) []bool {
 		bfs = bfs[1:]
 
 		if len(clusters[curr].children) == 0 {
-			if !math.IsInf(clusters[curr].stability, 1) {
+			if clusters[curr].stability > 0 || math.IsInf(clusters[curr].stability, 1) {
 				selected[curr] = true
 			}
 			continue
@@ -437,7 +421,7 @@ func selectClusters(clusters []cCluster) []bool {
 			childSum += propStability[childIdx]
 		}
 
-		if clusters[curr].stability >= childSum && !math.IsInf(clusters[curr].stability, 1) {
+		if clusters[curr].stability >= childSum {
 			selected[curr] = true
 		} else {
 			for _, childIdx := range clusters[curr].children {
