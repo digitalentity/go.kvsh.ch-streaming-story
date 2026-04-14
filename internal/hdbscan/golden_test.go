@@ -14,26 +14,26 @@ import (
 
 // goldenFixture is the JSON structure written by gen_golden.py.
 type goldenFixture struct {
-	Description          string      `json:"description"`
-	Source               string      `json:"source"`
-	N                    int         `json:"n"`
-	MinClusterSize       int         `json:"min_cluster_size"`
-	MinSamples           int         `json:"min_samples"`
-	ClusterSelectionMethod string    `json:"cluster_selection_method"`
-	IDs                  []string    `json:"ids"`
-	Titles               []string    `json:"titles"`
-	Embeddings           [][]float32 `json:"embeddings"`
-	Labels               []int       `json:"labels"`
+	Description            string      `json:"description"`
+	Source                 string      `json:"source"`
+	N                      int         `json:"n"`
+	MinClusterSize         int         `json:"min_cluster_size"`
+	MinSamples             int         `json:"min_samples"`
+	ClusterSelectionMethod string      `json:"cluster_selection_method"`
+	IDs                    []string    `json:"ids"`
+	Titles                 []string    `json:"titles"`
+	Embeddings             [][]float32 `json:"embeddings"`
+	Labels                 []int       `json:"labels"`
 }
 
 // TestGolden_ARI loads every golden_*.json fixture and verifies that our
-// HDBSCAN implementation produces labels with Adjusted Rand Index ≥ 0.80
+// HDBSCAN implementation produces labels with Adjusted Rand Index ≥ 0.90
 // against the reference Python output.
 //
 // The threshold is intentionally lenient: minor algorithmic differences
 // (MST tie-breaking, floating-point order) can flip borderline points without
-// meaningfully changing the partition.  An ARI of 0.80 still requires strong
-// structural agreement.
+// meaningfully changing the partition.  An ARI of 0.90 still requires very
+// strong structural agreement.
 func TestGolden_ARI(t *testing.T) {
 	fixtures, err := filepath.Glob(filepath.Join("testdata", "golden_*.json"))
 	require.NoError(t, err)
@@ -60,7 +60,7 @@ func TestGolden_ARI(t *testing.T) {
 				fix.MinClusterSize, fix.MinSamples, fix.N,
 				clusterCount(fix.Labels), clusterCount(got),
 			)
-			assert.GreaterOrEqualf(t, ari, 0.80,
+			assert.GreaterOrEqualf(t, ari, 0.90,
 				"ARI below threshold for %s\ndescription: %s",
 				filepath.Base(path), fix.Description,
 			)

@@ -77,7 +77,7 @@ func Cluster(pts [][]float32, minClusterSize, minSamples int) ([]int, error) {
 
 func labelSubtree(clusters []cCluster, idx int, labelID int, labels []int, pointFallout []fallout) {
 	for _, f := range pointFallout {
-		if f.clusterIdx == idx && !f.isNoise {
+		if f.clusterIdx == idx {
 			labels[f.pointIdx] = labelID
 		}
 	}
@@ -90,14 +90,26 @@ func labelSubtree(clusters []cCluster, idx int, labelID int, labels []int, point
 
 func pairwiseCosine(pts [][]float32) [][]float64 {
 	n := len(pts)
-	norms := make([]float64, n)
+
+	// Normalize in float32, matching Python's: embs_n = embs / norm(embs, axis=1).
+	// Python computes norms and the matrix multiply in float32, then converts to
+	// float64.  Replicating this keeps our MRD values bit-compatible with the
+	// reference, which matters for MST tie-breaking when min_samples > 1.
+	normalized := make([][]float32, n)
 	for i, p := range pts {
-		var s float64
+		var s float32
 		for _, v := range p {
-			s += float64(v) * float64(v)
+			s += v * v
 		}
-		norms[i] = math.Sqrt(s)
+		norm := float32(math.Sqrt(float64(s)))
+		normalized[i] = make([]float32, len(p))
+		if norm > 0 {
+			for k, v := range p {
+				normalized[i][k] = v / norm
+			}
+		}
 	}
+
 	dist := make([][]float64, n)
 	for i := range dist {
 		dist[i] = make([]float64, n)
@@ -105,26 +117,18 @@ func pairwiseCosine(pts [][]float32) [][]float64 {
 			if i == j {
 				continue
 			}
-			ni, nj := norms[i], norms[j]
-			if ni == 0 && nj == 0 {
-				dist[i][j] = 0
-				continue
+			// Float32 dot product matches Python's float32 matmul (BLAS SGEMM).
+			var dot float32
+			ni, nj := normalized[i], normalized[j]
+			for k := range ni {
+				dot += ni[k] * nj[k]
 			}
-			if ni == 0 || nj == 0 {
-				dist[i][j] = 1
-				continue
+			if dot > 1 {
+				dot = 1
+			} else if dot < -1 {
+				dot = -1
 			}
-			var dot float64
-			for k := range pts[i] {
-				dot += float64(pts[i][k]) * float64(pts[j][k])
-			}
-			cos := dot / (ni * nj)
-			if cos > 1 {
-				cos = 1
-			} else if cos < -1 {
-				cos = -1
-			}
-			dist[i][j] = 1 - cos
+			dist[i][j] = float64(1 - dot)
 		}
 	}
 	return dist
@@ -134,9 +138,6 @@ func pairwiseCosine(pts [][]float32) [][]float64 {
 
 func coreDistances(dist [][]float64, n, minSamples int) []float64 {
 	core := make([]float64, n)
-	if minSamples <= 1 {
-		return core
-	}
 	row := make([]float64, n-1)
 	for i := 0; i < n; i++ {
 		idx := 0
@@ -146,10 +147,10 @@ func coreDistances(dist [][]float64, n, minSamples int) []float64 {
 				idx++
 			}
 		}
-		// Python hdbscan min_samples=k means distance to k-th neighbor (including self).
-		// Our 'row' excludes self, so k-th neighbor including self is (k-1)-th 
-		// neighbor in 'row', which is index k-2.
-		core[i] = kthSmallest(row, minSamples-2)
+		// Python hdbscan's mutual_reachability(dist_matrix, k) uses the
+		// k-th nearest neighbour *excluding* self (0-indexed: k-1).
+		// Empirically confirmed: min_samples=5 → sorted_excl_self[4].
+		core[i] = kthSmallest(row, minSamples-1)
 	}
 	return core
 }
@@ -199,7 +200,6 @@ func primMST(dist [][]float64, core []float64, n int) []edge {
 			if inTree[v] {
 				continue
 			}
-			// mrd(u, v) = max(dist[u][v], core[u], core[v])
 			mrdUV := dist[u][v]
 			if core[u] > mrdUV {
 				mrdUV = core[u]
