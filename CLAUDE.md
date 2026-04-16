@@ -60,7 +60,7 @@ Outliers are evicted when `At < lastBatchTimestamp − OutlierTTL`. The referenc
 
 ### Concurrency
 
-`bbolt` is single-writer. During the Apply phase an `applyInProgress` flag redirects `Ingest` calls into an in-memory `ingestBuffer` (bounded channel). The batch goroutine drains the buffer in a follow-up transaction. This is **at-most-once**: a crash between the Apply commit and the drain loses buffered signals.
+The underlying KV store is assumed to be single-writer/multi-reader (like `bbolt` or `LevelDB`). During the Apply phase an `applyInProgress` flag redirects `Ingest` calls into an in-memory `ingestBuffer` (bounded channel). The batch goroutine drains the buffer in a follow-up transaction. This is **at-most-once**: a crash between the Apply commit and the drain loses buffered signals.
 
 ### KV key schema
 

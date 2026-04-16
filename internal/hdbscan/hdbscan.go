@@ -14,6 +14,8 @@ import (
 	"errors"
 	"math"
 	"sort"
+
+	"go.kvsh.ch/streaming-story/internal/dist"
 )
 
 // Cluster runs HDBSCAN* on pts and returns a cluster label per point.
@@ -97,11 +99,7 @@ func pairwiseCosine(pts [][]float32) [][]float64 {
 	// reference, which matters for MST tie-breaking when min_samples > 1.
 	normalized := make([][]float32, n)
 	for i, p := range pts {
-		var s float32
-		for _, v := range p {
-			s += v * v
-		}
-		norm := float32(math.Sqrt(float64(s)))
+		norm := dist.Norm(p)
 		normalized[i] = make([]float32, len(p))
 		if norm > 0 {
 			for k, v := range p {
@@ -110,28 +108,24 @@ func pairwiseCosine(pts [][]float32) [][]float64 {
 		}
 	}
 
-	dist := make([][]float64, n)
-	for i := range dist {
-		dist[i] = make([]float64, n)
+	distMatrix := make([][]float64, n)
+	for i := range distMatrix {
+		distMatrix[i] = make([]float64, n)
 		for j := 0; j < n; j++ {
 			if i == j {
 				continue
 			}
 			// Float32 dot product matches Python's float32 matmul (BLAS SGEMM).
-			var dot float32
-			ni, nj := normalized[i], normalized[j]
-			for k := range ni {
-				dot += ni[k] * nj[k]
-			}
+			dot := dist.Dot(normalized[i], normalized[j])
 			if dot > 1 {
 				dot = 1
 			} else if dot < -1 {
 				dot = -1
 			}
-			dist[i][j] = float64(1 - dot)
+			distMatrix[i][j] = float64(1 - dot)
 		}
 	}
-	return dist
+	return distMatrix
 }
 
 // ── Step 2: core distances ───────────────────────────────────────────────────

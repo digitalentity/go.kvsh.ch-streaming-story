@@ -180,7 +180,7 @@ The `StabilityWindow` config field is **removed**; `BatchWindow` is the authorit
 
 ## Persistence: Prefix-based KV Store
 
-The library interacts with a minimal `Store` interface, defaulting to `bbolt`.
+The library interacts with a minimal `Store` interface.
 
 ### Key Schema
 
@@ -204,13 +204,13 @@ The library interacts with a minimal `Store` interface, defaulting to `bbolt`.
 
 ### Ingest vs. Batch Apply
 
-`bbolt` permits only one write transaction at a time. A Batch `Apply` phase that rewrites thousands of signal keys (moving signals between stories, updating indices) will block all concurrent `Ingest` calls for its full duration, causing latency spikes proportional to batch size.
+The underlying KV store is assumed to permit only one write transaction at a time. A Batch `Apply` phase that rewrites thousands of signal keys (moving signals between stories, updating indices) will block all concurrent `Ingest` calls for its full duration, causing latency spikes proportional to batch size.
 
 **Strategy — In-memory Ingest Buffer during Apply**
 
 1. When the Batch goroutine begins its `Apply` phase it sets an atomic `applyInProgress` flag.
-2. `Ingest` calls that arrive while `applyInProgress` is set write their signals to an in-memory staging channel (`ingestBuffer`, bounded to `IngestBufferCap` signals, default: 10,000) instead of directly to bbolt.
-3. Once the `Apply` transaction commits, the batch goroutine drains `ingestBuffer` into bbolt in a follow-up write transaction before clearing `applyInProgress`.
+2. `Ingest` calls that arrive while `applyInProgress` is set write their signals to an in-memory staging channel (`ingestBuffer`, bounded to `IngestBufferCap` signals, default: 10,000) instead of directly to the KV store.
+3. Once the `Apply` transaction commits, the batch goroutine drains `ingestBuffer` into the store in a follow-up write transaction before clearing `applyInProgress`.
 4. If `ingestBuffer` is full, `Ingest` blocks until space is available (or `ctx` is cancelled). This provides natural back-pressure without data loss.
 
 Ordering guarantee: all signals from the batch window precede all buffer-drain signals in the KV store, which is consistent with their temporal ordering and means Draft assignments made against the staged signals remain valid.
